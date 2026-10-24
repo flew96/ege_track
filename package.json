@@ -1,0 +1,17 @@
+{
+  "name": "ege-track",
+  "version": "1.0.0",
+  "description": "Трекер пройденных задач ЕГЭ по классам",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
