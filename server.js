@@ -1,3 +1,9 @@
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 13)) {
+  console.error(`Нужен Node.js 22.13 или новее, а установлен ${process.version}. Обновите Node.js: https://nodejs.org`);
+  process.exit(1);
+}
+
 const path = require('node:path');
 const crypto = require('node:crypto');
 const express = require('express');
@@ -12,6 +18,8 @@ ensureFirstAdmin();
 const app = express();
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY);
 app.use(express.json({ limit: '200kb' }));
+// Express считает /admin и /admin/ одним путём, поэтому сравниваем сами
+app.use((req, res, next) => (req.path === '/admin/' ? res.redirect(301, '../admin') : next()));
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 
 // ---------- утилиты ----------
@@ -49,9 +57,28 @@ function int(value, field, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   return n;
 }
 
-function today() {
+function today(offsetDays = 0) {
   const d = new Date();
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000 + offsetDays * 86400000).toISOString().slice(0, 10);
+}
+
+function date(value) {
+  // Проверяем, что такая дата существует (31 февраля — нет). Завтрашнюю дату разрешаем
+  // на случай, если у учителя на компьютере другой часовой пояс.
+  const parsed = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    && new Date(`${value}T00:00:00Z`);
+  const ok = parsed && !Number.isNaN(parsed.getTime()) && parsed.toISOString().startsWith(value);
+  if (!ok) throw new HttpError(400, 'Неверная дата');
+  if (value > today(1)) throw new HttpError(400, 'Дата не может быть в будущем');
+  return value;
+}
+
+// SQLite сравнивает без учёта регистра только латиницу, поэтому «11А» и «11а» проверяем сами
+function assertUniqueName(table, column, name, exceptId = null) {
+  const lower = name.toLocaleLowerCase('ru');
+  const taken = db.prepare(`SELECT id, ${column} AS name FROM ${table}`).all()
+    .some((r) => r.id !== exceptId && r.name.toLocaleLowerCase('ru') === lower);
+  if (taken) throw new HttpError(409, `«${name}» уже есть`);
 }
 
 function idList(value, field) {
@@ -150,7 +177,9 @@ app.post('/api/login', (req, res) => {
   const key = loginKey(username, req.ip);
   checkLoginLimit(key);
 
-  const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(username);
+  const lower = username.toLocaleLowerCase('ru');
+  const admin = db.prepare('SELECT * FROM admins').all()
+    .find((a) => a.username.toLocaleLowerCase('ru') === lower);
   if (!admin || !verifyPassword(password, admin.password_hash)) {
     recordLoginFailure(key);
     throw new HttpError(401, 'Неверный логин или пароль');
@@ -237,6 +266,7 @@ function saveTopics(subjectId, taskCount, topics) {
 app.post('/api/subjects', requireAdmin, requireSuper, (req, res) => {
   const name = str(req.body?.name, 'Название');
   const taskCount = int(req.body?.task_count, 'Количество задач', { max: MAX_TASKS });
+  assertUniqueName('subjects', 'name', name);
   const id = transaction(() => {
     const { lastInsertRowid } = db.prepare('INSERT INTO subjects (name, task_count) VALUES (?, ?)')
       .run(name, taskCount);
@@ -251,6 +281,7 @@ app.put('/api/subjects/:id', requireAdmin, (req, res) => {
   if (!canEditSubject(req.admin, id)) throw new HttpError(403, 'У вас нет прав на этот предмет');
   const name = str(req.body?.name, 'Название');
   const taskCount = int(req.body?.task_count, 'Количество задач', { max: MAX_TASKS });
+  assertUniqueName('subjects', 'name', name, id);
   transaction(() => {
     const { changes } = db.prepare('UPDATE subjects SET name = ?, task_count = ? WHERE id = ?')
       .run(name, taskCount, id);
@@ -289,6 +320,7 @@ function setClassSubjects(classId, subjectIds) {
 app.post('/api/classes', requireAdmin, requireSuper, (req, res) => {
   const name = str(req.body?.name, 'Название класса', { max: 30 });
   const subjectIds = idList(req.body?.subject_ids ?? [], 'Предметы');
+  assertUniqueName('classes', 'name', name);
   const id = transaction(() => {
     const { lastInsertRowid } = db.prepare('INSERT INTO classes (name) VALUES (?)').run(name);
     setClassSubjects(Number(lastInsertRowid), subjectIds);
@@ -301,6 +333,7 @@ app.put('/api/classes/:id', requireAdmin, requireSuper, (req, res) => {
   const id = int(req.params.id, 'id');
   const name = str(req.body?.name, 'Название класса', { max: 30 });
   const subjectIds = idList(req.body?.subject_ids ?? [], 'Предметы');
+  assertUniqueName('classes', 'name', name, id);
   transaction(() => {
     const { changes } = db.prepare('UPDATE classes SET name = ? WHERE id = ?').run(name, id);
     if (!changes) throw new HttpError(404, 'Класс не найден');
@@ -338,16 +371,13 @@ app.put('/api/progress', requireAdmin, (req, res) => {
     return res.json({ ok: true });
   }
 
-  const date = req.body?.date || today();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) {
-    throw new HttpError(400, 'Неверная дата');
-  }
+  const markDate = date(req.body?.date || today());
   db.prepare(`
     INSERT INTO progress (class_id, subject_id, task_number, status, date, updated_by)
     VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT (class_id, subject_id, task_number)
     DO UPDATE SET status = excluded.status, date = excluded.date, updated_by = excluded.updated_by
-  `).run(classId, subjectId, taskNumber, status, date, req.admin.username);
+  `).run(classId, subjectId, taskNumber, status, markDate, req.admin.username);
   res.json({ ok: true });
 });
 
@@ -365,6 +395,7 @@ app.post('/api/admins', requireAdmin, requireSuper, (req, res) => {
   }
   const password = str(req.body?.password, 'Пароль', { min: 6, max: 200 });
   const subjectIds = idList(req.body?.subject_ids ?? [], 'Предметы');
+  assertUniqueName('admins', 'username', username);
   const id = transaction(() => {
     const { lastInsertRowid } = db.prepare(
       'INSERT INTO admins (username, password_hash, is_super) VALUES (?, ?, ?)',
@@ -412,6 +443,10 @@ app.delete('/api/admins/:id', requireAdmin, requireSuper, (req, res) => {
 
 app.use('/api', (req, res) => {
   res.status(404).json({ error: 'Не найдено' });
+});
+
+app.use((req, res) => {
+  res.status(404).sendFile(path.join(__dirname, 'public', '404.html'));
 });
 
 app.use((err, req, res, next) => {

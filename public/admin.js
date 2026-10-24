@@ -79,6 +79,13 @@ function renderLogin() {
   });
 }
 
+window.addEventListener('hashchange', () => {
+  const tab = location.hash.slice(1);
+  if (!state.me || !state.data || tab === state.tab) return;
+  state.tab = tab;
+  render();
+});
+
 document.getElementById('logout').addEventListener('click', async () => {
   await api('POST', 'api/logout').catch(() => {});
   state.me = null;
@@ -146,7 +153,8 @@ function openDialog(title, fieldsHtml, onSubmit, submitLabel = 'Сохранит
   };
   document.getElementById('dialog-cancel').onclick = () => dialog.close();
   dialog.showModal();
-  dialogForm.querySelector('input, textarea')?.focus();
+  // Фокус на первое текстовое поле, а не на галочку, чтобы случайный пробел ничего не переключил
+  (dialogForm.querySelector('input:not([type=checkbox]), textarea') || dialogForm.querySelector('button.primary')).focus();
 }
 
 // ---------- вкладка «Отметки» ----------
