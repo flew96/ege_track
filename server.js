@@ -69,7 +69,27 @@ function currentAdmin(req) {
     FROM sessions s JOIN admins a ON a.id = s.admin_id
     WHERE s.token = ? AND s.expires_at > ?
   `).get(token, Date.now());
-  return row ? { id: row.id, username: row.username, is_super: !!row.is_super } : null;
+  if (!row) return null;
+  return { id: row.id, username: row.username, is_super: !!row.is_super, subject_ids: adminSubjectIds(row.id) };
+}
+
+function adminSubjectIds(adminId) {
+  return db.prepare('SELECT subject_id FROM admin_subjects WHERE admin_id = ? ORDER BY subject_id').all(adminId)
+    .map((r) => r.subject_id);
+}
+
+function canEditSubject(admin, subjectId) {
+  return admin.is_super || admin.subject_ids.includes(subjectId);
+}
+
+function setAdminSubjects(adminId, subjectIds) {
+  const exists = db.prepare('SELECT 1 FROM subjects WHERE id = ?');
+  for (const sid of subjectIds) {
+    if (!exists.get(sid)) throw new HttpError(400, 'Указан несуществующий предмет');
+  }
+  db.prepare('DELETE FROM admin_subjects WHERE admin_id = ?').run(adminId);
+  const add = db.prepare('INSERT INTO admin_subjects (admin_id, subject_id) VALUES (?, ?)');
+  for (const sid of subjectIds) add.run(adminId, sid);
 }
 
 function setSessionCookie(req, res, token, maxAgeSec) {
@@ -128,7 +148,8 @@ app.post('/api/login', (req, res) => {
   db.prepare('INSERT INTO sessions (token, admin_id, expires_at) VALUES (?, ?, ?)')
     .run(token, admin.id, Date.now() + SESSION_DAYS * 86400000);
   setSessionCookie(req, res, token, SESSION_DAYS * 86400);
-  res.json({ id: admin.id, username: admin.username, is_super: !!admin.is_super });
+  res.json({ id: admin.id, username: admin.username, is_super: !!admin.is_super,
+    subject_ids: adminSubjectIds(admin.id) });
 });
 
 app.post('/api/logout', (req, res) => {
@@ -199,7 +220,7 @@ function saveTopics(subjectId, taskCount, topics) {
   }
 }
 
-app.post('/api/subjects', requireAdmin, (req, res) => {
+app.post('/api/subjects', requireAdmin, requireSuper, (req, res) => {
   const name = str(req.body?.name, 'Название');
   const taskCount = int(req.body?.task_count, 'Количество задач', { max: MAX_TASKS });
   const id = transaction(() => {
@@ -213,6 +234,7 @@ app.post('/api/subjects', requireAdmin, (req, res) => {
 
 app.put('/api/subjects/:id', requireAdmin, (req, res) => {
   const id = int(req.params.id, 'id');
+  if (!canEditSubject(req.admin, id)) throw new HttpError(403, 'У вас нет прав на этот предмет');
   const name = str(req.body?.name, 'Название');
   const taskCount = int(req.body?.task_count, 'Количество задач', { max: MAX_TASKS });
   transaction(() => {
@@ -227,7 +249,7 @@ app.put('/api/subjects/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/subjects/:id', requireAdmin, (req, res) => {
+app.delete('/api/subjects/:id', requireAdmin, requireSuper, (req, res) => {
   const id = int(req.params.id, 'id');
   const { changes } = db.prepare('DELETE FROM subjects WHERE id = ?').run(id);
   if (!changes) throw new HttpError(404, 'Предмет не найден');
@@ -250,7 +272,7 @@ function setClassSubjects(classId, subjectIds) {
   for (const sid of subjectIds) add.run(classId, sid);
 }
 
-app.post('/api/classes', requireAdmin, (req, res) => {
+app.post('/api/classes', requireAdmin, requireSuper, (req, res) => {
   const name = str(req.body?.name, 'Название класса', { max: 30 });
   const subjectIds = idList(req.body?.subject_ids ?? [], 'Предметы');
   const id = transaction(() => {
@@ -261,7 +283,7 @@ app.post('/api/classes', requireAdmin, (req, res) => {
   res.status(201).json({ id });
 });
 
-app.put('/api/classes/:id', requireAdmin, (req, res) => {
+app.put('/api/classes/:id', requireAdmin, requireSuper, (req, res) => {
   const id = int(req.params.id, 'id');
   const name = str(req.body?.name, 'Название класса', { max: 30 });
   const subjectIds = idList(req.body?.subject_ids ?? [], 'Предметы');
@@ -273,7 +295,7 @@ app.put('/api/classes/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/classes/:id', requireAdmin, (req, res) => {
+app.delete('/api/classes/:id', requireAdmin, requireSuper, (req, res) => {
   const id = int(req.params.id, 'id');
   const { changes } = db.prepare('DELETE FROM classes WHERE id = ?').run(id);
   if (!changes) throw new HttpError(404, 'Класс не найден');
@@ -287,6 +309,7 @@ app.put('/api/progress', requireAdmin, (req, res) => {
   const subjectId = int(req.body?.subject_id, 'Предмет');
   const status = req.body?.status;
   if (!['done', 'in_progress', 'none'].includes(status)) throw new HttpError(400, 'Неверный статус');
+  if (!canEditSubject(req.admin, subjectId)) throw new HttpError(403, 'У вас нет прав на этот предмет');
 
   const subject = db.prepare(`
     SELECT s.task_count FROM class_subjects cs JOIN subjects s ON s.id = cs.subject_id
@@ -318,7 +341,7 @@ app.put('/api/progress', requireAdmin, (req, res) => {
 
 app.get('/api/admins', requireAdmin, requireSuper, (req, res) => {
   const rows = db.prepare('SELECT id, username, is_super, created_at FROM admins ORDER BY username').all();
-  res.json(rows.map((r) => ({ ...r, is_super: !!r.is_super })));
+  res.json(rows.map((r) => ({ ...r, is_super: !!r.is_super, subject_ids: adminSubjectIds(r.id) })));
 });
 
 app.post('/api/admins', requireAdmin, requireSuper, (req, res) => {
@@ -327,10 +350,15 @@ app.post('/api/admins', requireAdmin, requireSuper, (req, res) => {
     throw new HttpError(400, 'Логин может содержать только буквы, цифры, точку, дефис и _');
   }
   const password = str(req.body?.password, 'Пароль', { min: 6, max: 200 });
-  const { lastInsertRowid } = db.prepare(
-    'INSERT INTO admins (username, password_hash, is_super) VALUES (?, ?, ?)',
-  ).run(username, hashPassword(password), req.body?.is_super ? 1 : 0);
-  res.status(201).json({ id: Number(lastInsertRowid) });
+  const subjectIds = idList(req.body?.subject_ids ?? [], 'Предметы');
+  const id = transaction(() => {
+    const { lastInsertRowid } = db.prepare(
+      'INSERT INTO admins (username, password_hash, is_super) VALUES (?, ?, ?)',
+    ).run(username, hashPassword(password), req.body?.is_super ? 1 : 0);
+    setAdminSubjects(Number(lastInsertRowid), subjectIds);
+    return Number(lastInsertRowid);
+  });
+  res.status(201).json({ id });
 });
 
 app.put('/api/admins/:id', requireAdmin, requireSuper, (req, res) => {
@@ -350,6 +378,9 @@ app.put('/api/admins/:id', requireAdmin, requireSuper, (req, res) => {
         throw new HttpError(400, 'Нельзя снять права главного администратора с самого себя');
       }
       db.prepare('UPDATE admins SET is_super = ? WHERE id = ?').run(req.body.is_super ? 1 : 0, id);
+    }
+    if (req.body?.subject_ids !== undefined) {
+      setAdminSubjects(id, idList(req.body.subject_ids, 'Предметы'));
     }
   });
   res.json({ ok: true });

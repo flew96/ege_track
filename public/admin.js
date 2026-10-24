@@ -6,7 +6,7 @@ const dialogForm = document.getElementById('dialog-form');
 
 const TABS = [
   { id: 'marks', title: 'Отметки' },
-  { id: 'classes', title: 'Классы' },
+  { id: 'classes', title: 'Классы', superOnly: true },
   { id: 'subjects', title: 'Предметы' },
   { id: 'admins', title: 'Администраторы', superOnly: true },
   { id: 'account', title: 'Мой аккаунт' },
@@ -20,6 +20,10 @@ const state = {
   tab: location.hash.slice(1) || 'marks',
   classId: Number(storageGet('adminClassId')) || null,
 };
+
+function canEdit(subjectId) {
+  return state.me.is_super || state.me.subject_ids.includes(subjectId);
+}
 
 // ---------- запуск и вход ----------
 
@@ -40,6 +44,8 @@ async function init() {
 async function reload() {
   state.data = await api('GET', 'api/data');
   state.index = indexProgress(state.data.progress);
+  // Права могли поменяться, пока админ был в системе
+  if (state.data.admin) state.me = state.data.admin;
   if (state.me.is_super) state.admins = await api('GET', 'api/admins');
   render();
 }
@@ -146,8 +152,19 @@ function openDialog(title, fieldsHtml, onSubmit, submitLabel = 'Сохранит
 // ---------- вкладка «Отметки» ----------
 
 function renderMarks(el) {
-  const { classes, subjects } = state.data;
+  const subjects = state.data.subjects.filter((s) => canEdit(s.id));
+  const classes = state.data.classes.filter((c) => c.subject_ids.some((id) => canEdit(id)));
+  if (!state.me.is_super && !subjects.length) {
+    el.innerHTML = `<div class="empty-state"><strong>Вам пока не назначены предметы</strong>
+      Попросите главного администратора выдать права на ваш предмет.</div>`;
+    return;
+  }
   if (!classes.length) {
+    if (!state.me.is_super) {
+      el.innerHTML = `<div class="empty-state"><strong>Ваши предметы ещё не назначены ни одному классу</strong>
+        Это делает главный администратор во вкладке «Классы».</div>`;
+      return;
+    }
     el.innerHTML = `<div class="empty-state"><strong>Сначала создайте классы и предметы</strong>
       ${subjects.length ? '' : 'Начните с вкладки «Предметы» — задайте предмет и количество задач, '}
       затем добавьте класс во вкладке «Классы».</div>`;
@@ -294,13 +311,15 @@ function classDialog(cls) {
 // ---------- вкладка «Предметы» ----------
 
 function renderSubjects(el) {
-  const { subjects, classes } = state.data;
+  const { classes } = state.data;
+  const subjects = state.data.subjects.filter((s) => canEdit(s.id));
+  const isSuper = state.me.is_super;
 
   el.innerHTML = `
     <div class="section-head">
-      <h2>Предметы</h2>
+      <h2>${isSuper ? 'Предметы' : 'Мои предметы'}</h2>
       <span class="spacer"></span>
-      <button class="primary" id="add-subject">+ Добавить предмет</button>
+      ${isSuper ? '<button class="primary" id="add-subject">+ Добавить предмет</button>' : ''}
     </div>
     ${subjects.length ? `<div class="list">${subjects.map((s) => {
       const used = classes.filter((c) => c.subject_ids.includes(s.id)).length;
@@ -312,14 +331,17 @@ function renderSubjects(el) {
           ${topics ? ` · тем: ${topics}` : ''}</span>
         <span class="actions">
           <button class="small" data-edit="${s.id}">Изменить</button>
-          <button class="small danger" data-delete="${s.id}">Удалить</button>
+          ${isSuper ? `<button class="small danger" data-delete="${s.id}">Удалить</button>` : ''}
         </span>
       </div>`;
     }).join('')}</div>`
-    : `<div class="empty-state"><strong>Предметов пока нет</strong>
-      Добавьте предмет и укажите, сколько в нём задач ЕГЭ (например, профильная математика — 19).</div>`}`;
+    : isSuper
+      ? `<div class="empty-state"><strong>Предметов пока нет</strong>
+        Добавьте предмет и укажите, сколько в нём задач ЕГЭ (например, профильная математика — 19).</div>`
+      : `<div class="empty-state"><strong>Вам пока не назначены предметы</strong>
+        Попросите главного администратора выдать права на ваш предмет.</div>`}`;
 
-  el.querySelector('#add-subject').addEventListener('click', () => subjectDialog(null));
+  el.querySelector('#add-subject')?.addEventListener('click', () => subjectDialog(null));
   el.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () =>
     subjectDialog(subjects.find((s) => s.id === Number(b.dataset.edit)))));
   el.querySelectorAll('[data-delete]').forEach((b) => b.addEventListener('click', async () => {
@@ -367,25 +389,59 @@ function subjectDialog(subject) {
 
 // ---------- вкладка «Администраторы» ----------
 
+function rightsFieldsHtml(admin) {
+  const { subjects } = state.data;
+  return `
+    <label class="check" style="margin-bottom:12px"><input type="checkbox" name="is_super" id="rights-super"
+      ${admin?.is_super ? 'checked' : ''}> <b>Главный администратор</b> — доступ ко всему</label>
+    <div class="field" id="rights-subjects"><span class="hint" style="display:block;margin-bottom:6px">
+      Какие предметы может редактировать</span>
+      ${subjects.length ? subjects.map((s) => `<label class="check">
+        <input type="checkbox" name="subject" value="${s.id}" ${admin?.subject_ids.includes(s.id) ? 'checked' : ''}>
+        ${esc(s.name)}</label>`).join('')
+        : '<p class="hint">Предметов пока нет — сначала создайте их во вкладке «Предметы».</p>'}
+    </div>`;
+}
+
+// У главного админа доступ ко всем предметам, поэтому галочки предметов ему не нужны
+function bindRightsFields() {
+  const superBox = dialogForm.querySelector('#rights-super');
+  const subjectsBox = dialogForm.querySelector('#rights-subjects');
+  const sync = () => {
+    subjectsBox.style.opacity = superBox.checked ? '.45' : '';
+    subjectsBox.querySelectorAll('input').forEach((i) => { i.disabled = superBox.checked; });
+  };
+  superBox.addEventListener('change', sync);
+  sync();
+}
+
+function rightsFromForm(f) {
+  return { is_super: f.get('is_super') === 'on', subject_ids: f.getAll('subject').map(Number) };
+}
+
 function renderAdmins(el) {
+  const subjectName = new Map(state.data.subjects.map((s) => [s.id, s.name]));
   el.innerHTML = `
     <div class="section-head">
       <h2>Администраторы</h2>
       <span class="spacer"></span>
       <button class="primary" id="add-admin">+ Добавить</button>
     </div>
-    <p class="sub">Все администраторы могут вести классы, предметы и отметки.
-      Главные администраторы дополнительно управляют аккаунтами.</p>
+    <p class="sub">Учитель может отмечать задачи и менять темы только в своих предметах.
+      Главный администратор может всё: классы, предметы, аккаунты.</p>
     <div class="list">${state.admins.map((a) => `
       <div class="list-item">
         <span class="name">${esc(a.username)}</span>
-        ${a.is_super ? '<span class="tag accent">главный</span>' : ''}
         ${a.id === state.me.id ? '<span class="tag">это вы</span>' : ''}
+        <span class="row" style="gap:6px">${a.is_super
+          ? '<span class="tag accent">главный — все предметы</span>'
+          : a.subject_ids.length
+            ? a.subject_ids.map((id) => `<span class="tag">${esc(subjectName.get(id))}</span>`).join('')
+            : '<span class="meta">нет предметов</span>'}</span>
         <span class="actions">
+          ${a.id === state.me.id ? '' : `<button class="small" data-rights="${a.id}">Права</button>`}
           <button class="small" data-password="${a.id}">Сменить пароль</button>
-          ${a.id === state.me.id ? '' : `
-            <button class="small" data-super="${a.id}">${a.is_super ? 'Снять «главного»' : 'Сделать главным'}</button>
-            <button class="small danger" data-delete="${a.id}">Удалить</button>`}
+          ${a.id === state.me.id ? '' : `<button class="small danger" data-delete="${a.id}">Удалить</button>`}
         </span>
       </div>`).join('')}</div>`;
 
@@ -397,15 +453,25 @@ function renderAdmins(el) {
         <input type="text" name="username" required minlength="3" maxlength="40" autocomplete="off"></label>
       <label class="field"><span>Пароль (минимум 6 символов)</span>
         <input type="text" name="password" required minlength="6" autocomplete="new-password"></label>
-      <label class="check"><input type="checkbox" name="is_super"> Главный администратор</label>
+      ${rightsFieldsHtml(null)}
       <p class="hint">Передайте логин и пароль учителю — сменить пароль он сможет сам во вкладке «Мой аккаунт».</p>`,
     async (f) => {
       await api('POST', 'api/admins', {
-        username: f.get('username'), password: f.get('password'), is_super: f.get('is_super') === 'on',
+        username: f.get('username'), password: f.get('password'), ...rightsFromForm(f),
       });
       toast('Администратор добавлен');
     }, 'Добавить');
+    bindRightsFields();
   });
+
+  el.querySelectorAll('[data-rights]').forEach((b) => b.addEventListener('click', () => {
+    const a = byId(b.dataset.rights);
+    openDialog(`Права: ${a.username}`, rightsFieldsHtml(a), async (f) => {
+      await api('PUT', `api/admins/${a.id}`, rightsFromForm(f));
+      toast('Права сохранены');
+    });
+    bindRightsFields();
+  }));
 
   el.querySelectorAll('[data-password]').forEach((b) => b.addEventListener('click', () => {
     const a = byId(b.dataset.password);
@@ -416,11 +482,6 @@ function renderAdmins(el) {
       await api('PUT', `api/admins/${a.id}`, { password: f.get('password') });
       toast('Пароль изменён');
     });
-  }));
-
-  el.querySelectorAll('[data-super]').forEach((b) => b.addEventListener('click', async () => {
-    const a = byId(b.dataset.super);
-    if (await act(() => api('PUT', `api/admins/${a.id}`, { is_super: !a.is_super }), 'Сохранено')) reload();
   }));
 
   el.querySelectorAll('[data-delete]').forEach((b) => b.addEventListener('click', async () => {

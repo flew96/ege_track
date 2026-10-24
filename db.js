@@ -39,6 +39,13 @@ db.exec(`
     PRIMARY KEY (subject_id, task_number)
   );
 
+  -- Предметы, которые может редактировать обычный (не главный) администратор
+  CREATE TABLE IF NOT EXISTS admin_subjects (
+    admin_id   INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    PRIMARY KEY (admin_id, subject_id)
+  );
+
   CREATE TABLE IF NOT EXISTS classes (
     id   INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE COLLATE NOCASE
