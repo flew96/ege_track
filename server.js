@@ -109,39 +109,53 @@ function requireSuper(req, res, next) {
   next();
 }
 
-// Простая защита от перебора паролей: 10 неудачных попыток за 15 минут с одного IP
+// Защита от перебора паролей: 10 неудачных попыток за 15 минут для пары «логин + IP».
+// Считаем не по одному IP, потому что в школе все компьютеры часто выходят в сеть
+// через общий адрес — иначе любой ученик мог бы заблокировать вход всем учителям.
 const loginFailures = new Map();
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 10;
 
-function checkLoginLimit(ip) {
-  const entry = loginFailures.get(ip);
-  if (entry && entry.until > Date.now() && entry.count >= 10) {
+function loginKey(username, ip) {
+  return `${username.toLowerCase()}|${ip}`;
+}
+
+function checkLoginLimit(key) {
+  const entry = loginFailures.get(key);
+  if (entry && entry.until > Date.now() && entry.count >= LOGIN_MAX_FAILURES) {
     throw new HttpError(429, 'Слишком много попыток. Попробуйте через 15 минут');
   }
 }
 
-function recordLoginFailure(ip) {
-  const entry = loginFailures.get(ip);
+function recordLoginFailure(key) {
+  const entry = loginFailures.get(key);
   if (!entry || entry.until < Date.now()) {
-    loginFailures.set(ip, { count: 1, until: Date.now() + LOGIN_WINDOW_MS });
+    loginFailures.set(key, { count: 1, until: Date.now() + LOGIN_WINDOW_MS });
   } else {
     entry.count++;
   }
 }
 
+// Чистим устаревшие записи, чтобы перебор разных логинов не раздувал память
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of loginFailures) if (entry.until < now) loginFailures.delete(key);
+}, LOGIN_WINDOW_MS).unref();
+
 // ---------- авторизация ----------
 
 app.post('/api/login', (req, res) => {
-  checkLoginLimit(req.ip);
   const username = str(req.body?.username, 'Логин');
   const password = str(req.body?.password, 'Пароль', { max: 200 });
+  const key = loginKey(username, req.ip);
+  checkLoginLimit(key);
 
   const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(username);
   if (!admin || !verifyPassword(password, admin.password_hash)) {
-    recordLoginFailure(req.ip);
+    recordLoginFailure(key);
     throw new HttpError(401, 'Неверный логин или пароль');
   }
-  loginFailures.delete(req.ip);
+  loginFailures.delete(key);
 
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
