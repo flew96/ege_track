@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const express = require('express');
 const { db, hashPassword, verifyPassword, transaction, ensureFirstAdmin } = require('./db');
+const { startBackups } = require('./backup');
 
 const PORT = Number(process.env.PORT) || 3000;
 const SESSION_DAYS = 30;
@@ -473,4 +474,5 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, () => {
   console.log(`Трекер ЕГЭ запущен: http://localhost:${PORT}`);
+  startBackups();
 });

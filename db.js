@@ -121,4 +121,4 @@ function ensureFirstAdmin() {
   console.log('==============================================\n');
 }
 
-module.exports = { db, hashPassword, verifyPassword, transaction, ensureFirstAdmin };
+module.exports = { db, DATA_DIR, hashPassword, verifyPassword, transaction, ensureFirstAdmin };
