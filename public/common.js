@@ -121,7 +121,14 @@ document.addEventListener('click', (e) => {
   if (openPopover && !openPopover.el.contains(e.target) && !openPopover.anchor.contains(e.target)) closePopover();
 });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePopover(); });
-window.addEventListener('resize', closePopover);
+// На телефонах resize приходит и при прокрутке (прячется адресная строка), и при открытии
+// клавиатуры или выбора даты — закрываем всплывашку, только если поменялась ширина
+let lastWidth = window.innerWidth;
+window.addEventListener('resize', () => {
+  if (window.innerWidth === lastWidth) return;
+  lastWidth = window.innerWidth;
+  closePopover();
+});
 
 // ---------- уведомления ----------
 

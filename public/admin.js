@@ -38,7 +38,11 @@ async function init() {
   }
   who.textContent = state.me.username;
   who.hidden = logout.hidden = false;
-  await reload();
+  try {
+    await reload();
+  } catch (err) {
+    app.innerHTML = `<div class="empty-state"><strong>Не удалось загрузить данные</strong>${esc(err.message)}</div>`;
+  }
 }
 
 async function reload() {
@@ -142,14 +146,19 @@ function openDialog(title, fieldsHtml, onSubmit, submitLabel = 'Сохранит
     e.preventDefault();
     const btn = dialogForm.querySelector('button.primary');
     btn.disabled = true;
+    let result;
     try {
-      const result = await onSubmit(new FormData(dialogForm));
-      if (result !== false) { dialog.close(); await reload(); }
+      result = await onSubmit(new FormData(dialogForm));
     } catch (err) {
       document.getElementById('dialog-error').textContent = err.message;
+      return;
     } finally {
       btn.disabled = false;
     }
+    if (result === false) return;
+    dialog.close();
+    // Диалог уже закрыт, поэтому ошибку обновления показываем уведомлением
+    await act(reload);
   };
   document.getElementById('dialog-cancel').onclick = () => dialog.close();
   dialog.showModal();
@@ -161,7 +170,9 @@ function openDialog(title, fieldsHtml, onSubmit, submitLabel = 'Сохранит
 
 function renderMarks(el) {
   const subjects = state.data.subjects.filter((s) => canEdit(s.id));
-  const classes = state.data.classes.filter((c) => c.subject_ids.some((id) => canEdit(id)));
+  // Главному показываем и классы без предметов — чтобы было видно, что их нужно настроить
+  const classes = state.me.is_super ? state.data.classes
+    : state.data.classes.filter((c) => c.subject_ids.some((id) => canEdit(id)));
   if (!state.me.is_super && !subjects.length) {
     el.innerHTML = `<div class="empty-state"><strong>Вам пока не назначены предметы</strong>
       Попросите главного администратора выдать права на ваш предмет.</div>`;

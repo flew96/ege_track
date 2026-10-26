@@ -9,6 +9,8 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, 'ege.db'));
 
 db.exec(`
+  -- Ждём, а не падаем, если базу в этот момент пишет другой процесс (например, npm run seed)
+  PRAGMA busy_timeout = 5000;
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
 

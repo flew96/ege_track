@@ -35,7 +35,9 @@ function parseCookies(header = '') {
   const out = {};
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    // Битую куку (например, «%E0») пропускаем, а не падаем с ошибкой 500
+    try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* пропускаем */ }
   }
   return out;
 }
@@ -212,6 +214,9 @@ app.put('/api/me/password', requireAdmin, (req, res) => {
   const { password_hash } = db.prepare('SELECT password_hash FROM admins WHERE id = ?').get(req.admin.id);
   if (!verifyPassword(current, password_hash)) throw new HttpError(400, 'Текущий пароль неверный');
   db.prepare('UPDATE admins SET password_hash = ? WHERE id = ?').run(hashPassword(next), req.admin.id);
+  // Выкидываем из сессий на других устройствах — на случай, если старый пароль кто-то узнал
+  db.prepare('DELETE FROM sessions WHERE admin_id = ? AND token != ?')
+    .run(req.admin.id, parseCookies(req.headers.cookie).sid);
   res.json({ ok: true });
 });
 
@@ -220,8 +225,9 @@ app.put('/api/me/password', requireAdmin, (req, res) => {
 app.get('/api/data', (req, res) => {
   const admin = currentAdmin(req);
 
-  const subjects = db.prepare('SELECT id, name, task_count FROM subjects ORDER BY name').all()
-    .map((s) => ({ ...s, topics: {} }));
+  const subjects = db.prepare('SELECT id, name, task_count FROM subjects').all()
+    .map((s) => ({ ...s, topics: {} }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
   const byId = new Map(subjects.map((s) => [s.id, s]));
   for (const t of db.prepare('SELECT * FROM task_topics').all()) {
     const s = byId.get(t.subject_id);
@@ -415,8 +421,9 @@ app.put('/api/admins/:id', requireAdmin, requireSuper, (req, res) => {
     if (req.body?.password !== undefined) {
       const password = str(req.body.password, 'Пароль', { min: 6, max: 200 });
       db.prepare('UPDATE admins SET password_hash = ? WHERE id = ?').run(hashPassword(password), id);
-      // Выкидываем из всех сессий, кроме своей
-      if (id !== req.admin.id) db.prepare('DELETE FROM sessions WHERE admin_id = ?').run(id);
+      // Выкидываем из всех сессий, кроме текущей
+      db.prepare('DELETE FROM sessions WHERE admin_id = ? AND token != ?')
+        .run(id, parseCookies(req.headers.cookie).sid);
     }
     if (req.body?.is_super !== undefined) {
       if (id === req.admin.id && !req.body.is_super) {
@@ -452,6 +459,11 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
   if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Неверный JSON' });
+  if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Слишком большой запрос' });
+  // Прочие ошибки разбора запроса (неверная кодировка и т.п.) — это ошибка клиента, а не сервера
+  if (err.expose && err.status >= 400 && err.status < 500) {
+    return res.status(err.status).json({ error: 'Неверный запрос' });
+  }
   if (String(err.message).includes('UNIQUE constraint failed')) {
     return res.status(409).json({ error: 'Такое имя уже занято' });
   }

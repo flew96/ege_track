@@ -42,9 +42,9 @@ function render() {
       <div class="grow">
         <h1>Пройденные задачи ЕГЭ</h1>
       </div>
-      <div class="segmented" role="tablist">
-        <button data-view="class" class="${state.view === 'class' ? 'active' : ''}">По классу</button>
-        <button data-view="compare" class="${state.view === 'compare' ? 'active' : ''}">Сравнить классы</button>
+      <div class="segmented">
+        ${segButton('view', 'class', 'По классу')}
+        ${segButton('view', 'compare', 'Сравнить классы')}
       </div>
     </div>
     <div id="view"></div>`;
@@ -58,6 +58,11 @@ function render() {
   const view = document.getElementById('view');
   if (state.view === 'compare') renderCompare(view, usedSubjects);
   else renderClass(view);
+}
+
+function segButton(key, value, title) {
+  const active = state[key] === value;
+  return `<button data-${key}="${value}" class="${active ? 'active' : ''}" aria-pressed="${active}">${title}</button>`;
 }
 
 // ---------- вид «по классу» ----------
@@ -94,8 +99,8 @@ function renderClass(view) {
         </div>
         <span class="spacer"></span>
         <div class="segmented">
-          <button data-layout="grid" class="${state.layout === 'grid' ? 'active' : ''}">Сетка</button>
-          <button data-layout="list" class="${state.layout === 'list' ? 'active' : ''}">Список</button>
+          ${segButton('layout', 'grid', 'Сетка')}
+          ${segButton('layout', 'list', 'Список')}
         </div>
       </div>
       <div class="cards">
@@ -165,7 +170,7 @@ function showTaskInfo(anchor, subject, classId, n) {
     <div class="p-title">${esc(subject.name)}, задача ${n}</div>
     ${topic ? `<div class="p-topic">${esc(topic)}</div>` : ''}
     <span class="badge ${status}">${STATUS_LABEL[status]}</span>
-    ${p ? `<div class="hint" style="margin-top:6px">${status === 'done' ? 'Пройдена' : 'Начали'} ${esc(formatDate(p.date))}</div>` : ''}
+    ${p ? `<div class="hint" style="margin-top:6px">${status === 'done' ? 'Дата:' : 'Начали'} ${esc(formatDate(p.date))}</div>` : ''}
   `);
 }
 
@@ -188,7 +193,8 @@ function renderCompare(view, usedSubjects) {
     for (let n = 1; n <= subject.task_count; n++) {
       const p = state.index.get(`${c.id}:${subject.id}:${n}`);
       const status = p?.status || 'none';
-      cells += `<td><div class="cell ${status}" title="${esc(`${c.name}, задача ${n} — ${STATUS_LABEL[status]}`)}"></div></td>`;
+      const title = `${c.name}, задача ${n} — ${STATUS_LABEL[status]}${p ? `, ${formatDate(p.date)}` : ''}`;
+      cells += `<td><div class="cell ${status}" title="${esc(title)}"></div></td>`;
     }
     return `<tr><td class="cls">${esc(c.name)}</td>${cells}<td class="pct">${st.done}/${st.total} · ${st.pct}%</td></tr>`;
   }).join('');

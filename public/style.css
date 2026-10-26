@@ -22,29 +22,28 @@
   color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #111418;
-    --surface: #1a1e24;
-    --surface-2: #232830;
-    --border: #2e343d;
-    --text: #e8eaed;
-    --muted: #98a1ac;
-    --accent: #6d8bff;
-    --accent-soft: #252f52;
-    --accent-text: #0d1117;
-    --done: #40c057;
-    --done-soft: #1d3a24;
-    --done-text: #8ce99a;
-    --progress: #fab005;
-    --progress-soft: #3d3114;
-    --progress-text: #ffd43b;
-    --none: #262b33;
-    --none-text: #7b8490;
-    --danger: #f06595;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
-    color-scheme: dark;
-  }
+/* Атрибут ставит theme.js: по системной теме или по выбору пользователя */
+:root[data-theme="dark"] {
+  --bg: #111418;
+  --surface: #1a1e24;
+  --surface-2: #232830;
+  --border: #2e343d;
+  --text: #e8eaed;
+  --muted: #98a1ac;
+  --accent: #6d8bff;
+  --accent-soft: #252f52;
+  --accent-text: #0d1117;
+  --done: #40c057;
+  --done-soft: #1d3a24;
+  --done-text: #8ce99a;
+  --progress: #fab005;
+  --progress-soft: #3d3114;
+  --progress-text: #ffd43b;
+  --none: #262b33;
+  --none-text: #7b8490;
+  --danger: #f06595;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -98,6 +97,19 @@ header.top .wrap {
 }
 .spacer { flex: 1; }
 .top-meta { color: var(--muted); font-size: 14px; }
+
+.theme-toggle {
+  display: grid; place-items: center;
+  padding: 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+.theme-toggle:hover { color: var(--text); }
+.theme-toggle svg { width: 18px; height: 18px; }
+/* В тёмной теме показываем солнце (переключить на светлую), в светлой — луну */
+:root[data-theme="dark"] .theme-toggle .moon,
+:root:not([data-theme="dark"]) .theme-toggle .sun { display: none; }
 
 main { padding: 24px 0 64px; }
 
