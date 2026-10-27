@@ -9,6 +9,7 @@ const TABS = [
   { id: 'classes', title: 'Классы', superOnly: true },
   { id: 'subjects', title: 'Предметы' },
   { id: 'admins', title: 'Администраторы', superOnly: true },
+  { id: 'history', title: 'История', superOnly: true },
   { id: 'account', title: 'Мой аккаунт' },
 ];
 
@@ -19,6 +20,7 @@ const state = {
   admins: [],
   tab: location.hash.slice(1) || 'marks',
   classId: Number(storageGet('adminClassId')) || null,
+  historyFilter: { classId: null, subjectId: null },
 };
 
 function canEdit(subjectId) {
@@ -128,7 +130,7 @@ function render() {
 
   const el = document.getElementById('tab');
   ({ marks: renderMarks, classes: renderClasses, subjects: renderSubjects,
-    admins: renderAdmins, account: renderAccount })[state.tab](el);
+    admins: renderAdmins, history: renderHistory, account: renderAccount })[state.tab](el);
 }
 
 // ---------- диалог ----------
@@ -393,11 +395,11 @@ function subjectDialog(subject) {
     const topics = {};
     lines.slice(0, taskCount).forEach((l, i) => { if (l.trim()) topics[i + 1] = l.trim(); });
 
-    if (subject && taskCount < subject.task_count) {
+    // Учителю сервер сам откажет и объяснит почему, а главного предупреждаем
+    if (subject && taskCount < subject.task_count && state.me.is_super) {
       const lost = state.data.progress.some((p) => p.subject_id === subject.id && p.task_number > taskCount);
-      if (lost && !confirm(`Отметки по задачам с ${taskCount + 1} по ${subject.task_count} будут удалены. Продолжить?`)) {
-        return false;
-      }
+      const question = `Отметки по задачам с ${taskCount + 1} по ${subject.task_count} будут удалены у всех классов. Продолжить?`;
+      if (lost && !confirm(question)) return false;
     }
     const body = { name: f.get('name'), task_count: taskCount, topics };
     if (subject) await api('PUT', `api/subjects/${subject.id}`, body);
@@ -508,6 +510,120 @@ function renderAdmins(el) {
     if (!confirm(`Удалить администратора ${a.username}?`)) return;
     if (await act(() => api('DELETE', `api/admins/${a.id}`), 'Удалён')) reload();
   }));
+}
+
+// ---------- вкладка «История» ----------
+
+let historyRequest = 0;
+
+function markStateText(status, date) {
+  return `${STATUS_LABEL[status || 'none']}${date ? `, ${shortDate(date)}` : ''}`;
+}
+
+function formatDateTime(ms) {
+  const d = new Date(ms);
+  const year = d.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' };
+  return d.toLocaleString('ru-RU', { day: 'numeric', month: 'long', ...year, hour: '2-digit', minute: '2-digit' });
+}
+
+function renderHistory(el) {
+  const { classes, subjects } = state.data;
+  const filter = state.historyFilter;
+  if (!classes.some((c) => c.id === filter.classId)) filter.classId = null;
+  if (!subjects.some((s) => s.id === filter.subjectId)) filter.subjectId = null;
+  const classById = new Map(classes.map((c) => [c.id, c]));
+  const subjectById = new Map(subjects.map((s) => [s.id, s]));
+  const options = (items, selected, all) => `<option value="">${all}</option>${items.map((x) =>
+    `<option value="${x.id}" ${x.id === selected ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}`;
+
+  el.innerHTML = `
+    <div class="section-head">
+      <h2>История изменений</h2>
+      <span class="spacer"></span>
+      <select id="history-class" aria-label="Класс">${options(classes, filter.classId, 'Все классы')}</select>
+      <select id="history-subject" aria-label="Предмет">${options(subjects, filter.subjectId, 'Все предметы')}</select>
+    </div>
+    <p class="sub">Кто и когда менял отметки. Последнее изменение задачи можно отменить.</p>
+    <div id="history-list"><p class="sub">Загрузка…</p></div>`;
+
+  el.querySelector('#history-class').addEventListener('change', (e) => {
+    filter.classId = Number(e.target.value) || null;
+    renderHistory(el);
+  });
+  el.querySelector('#history-subject').addEventListener('change', (e) => {
+    filter.subjectId = Number(e.target.value) || null;
+    renderHistory(el);
+  });
+
+  const list = el.querySelector('#history-list');
+  const entries = [];
+  let hasMore = false;
+
+  const itemHtml = (e) => {
+    const cls = classById.get(e.class_id);
+    const subject = subjectById.get(e.subject_id);
+    if (!cls || !subject) return '';
+    // Отменить можно, только если задача ещё есть у класса: её не убрали вместе с предметом
+    const canRevert = e.is_latest && cls.subject_ids.includes(subject.id) && e.task_number <= subject.task_count;
+    const badge = (status, date) => `<span class="badge ${status || 'none'}">${esc(markStateText(status, date))}</span>`;
+    return `<div class="list-item">
+      <span class="meta">${esc(formatDateTime(e.changed_at))}</span>
+      <span><b>${esc(cls.name)}</b> · ${esc(subject.name)} · задача ${e.task_number}</span>
+      <span class="row history-change">${badge(e.old_status, e.old_date)}<span class="meta">→</span>${badge(e.new_status, e.new_date)}</span>
+      <span class="meta">${esc(e.changed_by || '—')}</span>
+      <span class="actions">${canRevert ? `<button class="small" data-revert="${e.id}">Отменить</button>` : ''}</span>
+    </div>`;
+  };
+
+  const show = () => {
+    list.innerHTML = entries.length
+      ? `<div class="list">${entries.map(itemHtml).join('')}</div>
+        ${hasMore ? '<p style="text-align:center;margin-top:16px"><button id="history-more">Показать ещё</button></p>' : ''}`
+      : `<div class="empty-state"><strong>Изменений пока нет</strong>
+        Здесь появятся отметки, которые ставят учителя.</div>`;
+  };
+
+  const load = async (before) => {
+    const request = ++historyRequest;
+    const params = new URLSearchParams();
+    if (filter.classId) params.set('class_id', filter.classId);
+    if (filter.subjectId) params.set('subject_id', filter.subjectId);
+    if (before) params.set('before', before);
+    let page;
+    try {
+      page = await api('GET', `api/history?${params}`);
+    } catch (err) {
+      if (request !== historyRequest) return;
+      if (/войти/.test(err.message)) { state.me = null; init(); return; }
+      list.innerHTML = `<div class="empty-state"><strong>Не удалось загрузить историю</strong>${esc(err.message)}</div>`;
+      return;
+    }
+    // Пока ждали ответ, могли сменить фильтр или вкладку
+    if (request !== historyRequest || !list.isConnected) return;
+    entries.push(...page.entries);
+    hasMore = page.has_more;
+    show();
+  };
+
+  list.addEventListener('click', async (ev) => {
+    if (ev.target.closest('#history-more')) {
+      ev.target.disabled = true;
+      load(entries.at(-1).id);
+      return;
+    }
+    const b = ev.target.closest('[data-revert]');
+    if (!b) return;
+    const e = entries.find((x) => x.id === Number(b.dataset.revert));
+    const where = `${classById.get(e.class_id).name}, ${subjectById.get(e.subject_id).name}`;
+    if (!confirm(`Вернуть задачу ${e.task_number} (${where}) в состояние «${markStateText(e.old_status, e.old_date)}»?`)) return;
+    const ok = await act(() => api('PUT', 'api/progress', {
+      class_id: e.class_id, subject_id: e.subject_id, task_number: e.task_number,
+      status: e.old_status || 'none', date: e.old_date || undefined,
+    }), 'Изменение отменено');
+    if (ok) act(reload);
+  });
+
+  load();
 }
 
 // ---------- вкладка «Мой аккаунт» ----------

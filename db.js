@@ -71,6 +71,24 @@ db.exec(`
     FOREIGN KEY (class_id, subject_id)
       REFERENCES class_subjects(class_id, subject_id) ON DELETE CASCADE
   );
+
+  -- Журнал изменений отметок: кто, когда и что поменял. Статус NULL = «не начата».
+  -- Ссылается на класс и предмет, а не на class_subjects, чтобы запись о снятых отметках
+  -- осталась, когда у класса убирают предмет
+  CREATE TABLE IF NOT EXISTS progress_log (
+    id          INTEGER PRIMARY KEY,
+    class_id    INTEGER NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+    subject_id  INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    task_number INTEGER NOT NULL,
+    old_status  TEXT,
+    old_date    TEXT,
+    new_status  TEXT,
+    new_date    TEXT,
+    changed_by  TEXT,
+    changed_at  INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS progress_log_task ON progress_log (class_id, subject_id, task_number);
+  CREATE INDEX IF NOT EXISTS progress_log_subject ON progress_log (subject_id);
 `);
 
 // ---------- пароли ----------

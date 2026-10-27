@@ -14,8 +14,6 @@ const PORT = Number(process.env.PORT) || 3000;
 const SESSION_DAYS = 30;
 const MAX_TASKS = 100;
 
-ensureFirstAdmin();
-
 const app = express();
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY);
 app.use(express.json({ limit: '200kb' }));
@@ -87,6 +85,26 @@ function assertUniqueName(table, column, name, exceptId = null) {
 function idList(value, field) {
   if (!Array.isArray(value)) throw new HttpError(400, `Поле «${field}» должно быть списком`);
   return [...new Set(value.map((v) => int(v, field)))];
+}
+
+// ---------- журнал отметок ----------
+
+function logChange(classId, subjectId, taskNumber, old, next, by) {
+  db.prepare(`
+    INSERT INTO progress_log (class_id, subject_id, task_number, old_status, old_date,
+      new_status, new_date, changed_by, changed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(classId, subjectId, taskNumber, old?.status ?? null, old?.date ?? null,
+    next?.status ?? null, next?.date ?? null, by, Date.now());
+}
+
+// Отметки, которые сейчас удалятся вместе с задачами или предметом класса, записываем
+// в журнал как снятые — чтобы потом было видно, куда они делись
+function logRemovedMarks(where, params, by) {
+  db.prepare(`
+    INSERT INTO progress_log (class_id, subject_id, task_number, old_status, old_date, changed_by, changed_at)
+    SELECT class_id, subject_id, task_number, status, date, ?, ? FROM progress WHERE ${where}
+  `).run(by, Date.now(), ...params);
 }
 
 // ---------- сессии ----------
@@ -290,12 +308,24 @@ app.put('/api/subjects/:id', requireAdmin, (req, res) => {
   const taskCount = int(req.body?.task_count, 'Количество задач', { max: MAX_TASKS });
   assertUniqueName('subjects', 'name', name, id);
   transaction(() => {
-    const { changes } = db.prepare('UPDATE subjects SET name = ?, task_count = ? WHERE id = ?')
-      .run(name, taskCount, id);
-    if (!changes) throw new HttpError(404, 'Предмет не найден');
-    // Если задач стало меньше — убираем лишние отметки и темы
-    db.prepare('DELETE FROM progress WHERE subject_id = ? AND task_number > ?').run(id, taskCount);
-    db.prepare('DELETE FROM task_topics WHERE subject_id = ? AND task_number > ?').run(id, taskCount);
+    const subject = db.prepare('SELECT task_count FROM subjects WHERE id = ?').get(id);
+    if (!subject) throw new HttpError(404, 'Предмет не найден');
+    if (taskCount < subject.task_count) {
+      // Отметки по убранным задачам пропадут у всех классов сразу, поэтому учителю
+      // это можно, только пока по ним ничего не отмечено. Главному — всегда
+      const { n } = db.prepare('SELECT COUNT(*) AS n FROM progress WHERE subject_id = ? AND task_number > ?')
+        .get(id, taskCount);
+      if (n && !req.admin.is_super) {
+        const tasks = taskCount + 1 === subject.task_count
+          ? `задаче ${subject.task_count}` : `задачам ${taskCount + 1}–${subject.task_count}`;
+        throw new HttpError(403, `По ${tasks} уже есть отметки. Уменьшить число задач может только `
+          + 'главный администратор — или сначала снимите эти отметки');
+      }
+      logRemovedMarks('subject_id = ? AND task_number > ?', [id, taskCount], req.admin.username);
+      db.prepare('DELETE FROM progress WHERE subject_id = ? AND task_number > ?').run(id, taskCount);
+      db.prepare('DELETE FROM task_topics WHERE subject_id = ? AND task_number > ?').run(id, taskCount);
+    }
+    db.prepare('UPDATE subjects SET name = ?, task_count = ? WHERE id = ?').run(name, taskCount, id);
     saveTopics(id, taskCount, req.body?.topics);
   });
   res.json({ ok: true });
@@ -310,7 +340,7 @@ app.delete('/api/subjects/:id', requireAdmin, requireSuper, (req, res) => {
 
 // ---------- классы ----------
 
-function setClassSubjects(classId, subjectIds) {
+function setClassSubjects(classId, subjectIds, by) {
   const exists = db.prepare('SELECT 1 FROM subjects WHERE id = ?');
   for (const sid of subjectIds) {
     if (!exists.get(sid)) throw new HttpError(400, 'Указан несуществующий предмет');
@@ -319,7 +349,11 @@ function setClassSubjects(classId, subjectIds) {
   const current = db.prepare('SELECT subject_id FROM class_subjects WHERE class_id = ?').all(classId)
     .map((r) => r.subject_id);
   const del = db.prepare('DELETE FROM class_subjects WHERE class_id = ? AND subject_id = ?');
-  for (const sid of current) if (!subjectIds.includes(sid)) del.run(classId, sid);
+  for (const sid of current) {
+    if (subjectIds.includes(sid)) continue;
+    logRemovedMarks('class_id = ? AND subject_id = ?', [classId, sid], by);
+    del.run(classId, sid);
+  }
   const add = db.prepare('INSERT OR IGNORE INTO class_subjects (class_id, subject_id) VALUES (?, ?)');
   for (const sid of subjectIds) add.run(classId, sid);
 }
@@ -330,7 +364,7 @@ app.post('/api/classes', requireAdmin, requireSuper, (req, res) => {
   assertUniqueName('classes', 'name', name);
   const id = transaction(() => {
     const { lastInsertRowid } = db.prepare('INSERT INTO classes (name) VALUES (?)').run(name);
-    setClassSubjects(Number(lastInsertRowid), subjectIds);
+    setClassSubjects(Number(lastInsertRowid), subjectIds, req.admin.username);
     return Number(lastInsertRowid);
   });
   res.status(201).json({ id });
@@ -344,7 +378,7 @@ app.put('/api/classes/:id', requireAdmin, requireSuper, (req, res) => {
   transaction(() => {
     const { changes } = db.prepare('UPDATE classes SET name = ? WHERE id = ?').run(name, id);
     if (!changes) throw new HttpError(404, 'Класс не найден');
-    setClassSubjects(id, subjectIds);
+    setClassSubjects(id, subjectIds, req.admin.username);
   });
   res.json({ ok: true });
 });
@@ -372,20 +406,53 @@ app.put('/api/progress', requireAdmin, (req, res) => {
   if (!subject) throw new HttpError(400, 'У этого класса нет такого предмета');
   const taskNumber = int(req.body?.task_number, 'Номер задачи', { max: subject.task_count });
 
-  if (status === 'none') {
-    db.prepare('DELETE FROM progress WHERE class_id = ? AND subject_id = ? AND task_number = ?')
-      .run(classId, subjectId, taskNumber);
-    return res.json({ ok: true });
-  }
+  const old = db.prepare('SELECT status, date FROM progress WHERE class_id = ? AND subject_id = ? AND task_number = ?')
+    .get(classId, subjectId, taskNumber);
+  const next = status === 'none' ? null : { status, date: date(req.body?.date || today()) };
+  // Повторное нажатие на тот же статус ничего не меняет — и в журнал его не пишем
+  if (old?.status === next?.status && old?.date === next?.date) return res.json({ ok: true });
 
-  const markDate = date(req.body?.date || today());
-  db.prepare(`
-    INSERT INTO progress (class_id, subject_id, task_number, status, date, updated_by)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT (class_id, subject_id, task_number)
-    DO UPDATE SET status = excluded.status, date = excluded.date, updated_by = excluded.updated_by
-  `).run(classId, subjectId, taskNumber, status, markDate, req.admin.username);
+  transaction(() => {
+    if (next) {
+      db.prepare(`
+        INSERT INTO progress (class_id, subject_id, task_number, status, date, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (class_id, subject_id, task_number)
+        DO UPDATE SET status = excluded.status, date = excluded.date, updated_by = excluded.updated_by
+      `).run(classId, subjectId, taskNumber, next.status, next.date, req.admin.username);
+    } else {
+      db.prepare('DELETE FROM progress WHERE class_id = ? AND subject_id = ? AND task_number = ?')
+        .run(classId, subjectId, taskNumber);
+    }
+    logChange(classId, subjectId, taskNumber, old, next, req.admin.username);
+  });
   res.json({ ok: true });
+});
+
+// История изменений: новые сверху, по 50 штук; before — id последней показанной записи.
+// is_latest — это последнее изменение задачи, значит его можно отменить
+app.get('/api/history', requireAdmin, requireSuper, (req, res) => {
+  const optional = (value, field) => (value === undefined || value === '' ? null : int(value, field));
+  const classId = optional(req.query.class_id, 'Класс');
+  const subjectId = optional(req.query.subject_id, 'Предмет');
+  const before = optional(req.query.before, 'before');
+  const limit = int(req.query.limit ?? 50, 'limit', { max: 200 });
+
+  const rows = db.prepare(`
+    SELECT l.id, l.class_id, l.subject_id, l.task_number, l.old_status, l.old_date,
+      l.new_status, l.new_date, l.changed_by, l.changed_at,
+      l.id = (SELECT MAX(x.id) FROM progress_log x WHERE x.class_id = l.class_id
+        AND x.subject_id = l.subject_id AND x.task_number = l.task_number) AS is_latest
+    FROM progress_log l
+    WHERE (?1 IS NULL OR l.class_id = ?1) AND (?2 IS NULL OR l.subject_id = ?2) AND (?3 IS NULL OR l.id < ?3)
+    ORDER BY l.id DESC
+    LIMIT ?4
+  `).all(classId, subjectId, before, limit + 1);
+
+  res.json({
+    entries: rows.slice(0, limit).map((r) => ({ ...r, is_latest: !!r.is_latest })),
+    has_more: rows.length > limit,
+  });
 });
 
 // ---------- администраторы ----------
@@ -472,7 +539,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Ошибка сервера' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Трекер ЕГЭ запущен: http://localhost:${PORT}`);
-  startBackups();
-});
+// Тесты подключают сервер через require и запускают сами, на свободном порту
+if (require.main === module) {
+  ensureFirstAdmin();
+  app.listen(PORT, () => {
+    console.log(`Трекер ЕГЭ запущен: http://localhost:${PORT}`);
+    startBackups();
+  });
+}
+
+module.exports = app;

@@ -161,7 +161,7 @@ if (clashes.length && !RESET) {
 
 const summary = transaction(() => {
   if (RESET) {
-    // Темы, права, классы-предметы и отметки удалятся каскадом
+    // Темы, права, классы-предметы, отметки и журнал удалятся каскадом
     db.exec('DELETE FROM classes; DELETE FROM subjects;');
     const del = db.prepare('DELETE FROM admins WHERE username = ? AND is_super = 0');
     for (const a of clashes) del.run(a.username);
@@ -200,8 +200,18 @@ const summary = transaction(() => {
 
   const addClass = db.prepare('INSERT INTO classes (name) VALUES (?)');
   const addClassSubject = db.prepare('INSERT INTO class_subjects (class_id, subject_id) VALUES (?, ?)');
-  const addMark = db.prepare(`INSERT INTO progress (class_id, subject_id, task_number, status, date, updated_by)
+  const insertMark = db.prepare(`INSERT INTO progress (class_id, subject_id, task_number, status, date, updated_by)
     VALUES (?, ?, ?, ?, ?, ?)`);
+  const insertLog = db.prepare(`INSERT INTO progress_log (class_id, subject_id, task_number, new_status, new_date,
+    changed_by, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+  // Каждую отметку пишем и в журнал — будто учитель поставил её в этот день после уроков.
+  // В журнал вставляем в конце, по времени, потому что история показывается по порядку записей
+  const log = [];
+  const addMark = (classId, subjectId, task, status, d, by) => {
+    insertMark.run(classId, subjectId, task, status, isoDate(d), by);
+    const at = Math.min(d.getTime() + (13 + random() * 4) * 3600000, now.getTime());
+    log.push([classId, subjectId, task, status, isoDate(d), by, Math.round(at)]);
+  };
   let marks = 0;
 
   for (const c of CLASSES) {
@@ -225,16 +235,19 @@ const summary = transaction(() => {
         // Даты растут вместе с номером в порядке прохождения, с небольшим разбросом
         const t = yearStart.getTime() + span * ((i + 0.5 + (random() - 0.5) * 0.6) / Math.max(done, 1));
         const d = weekday(startOfDay(new Date(Math.min(Math.max(t, yearStart.getTime()), lastDone.getTime()))));
-        addMark.run(classId, subjectId, order[i], 'done', isoDate(d < yearStart ? yearStart : d), by);
+        addMark(classId, subjectId, order[i], 'done', d < yearStart ? yearStart : d, by);
         marks++;
       }
       for (let i = done; i < done + inProgress; i++) {
         const d = weekday(new Date(today.getTime() - Math.floor(random() * 10) * DAY));
-        addMark.run(classId, subjectId, order[i], 'in_progress', isoDate(d < yearStart ? yearStart : d), by);
+        addMark(classId, subjectId, order[i], 'in_progress', d < yearStart ? yearStart : d, by);
         marks++;
       }
     }
   }
+
+  log.sort((a, b) => a[6] - b[6]);
+  for (const row of log) insertLog.run(...row);
 
   return { subjects: SUBJECTS.length, classes: CLASSES.length, teachers: TEACHERS.length, marks };
 });

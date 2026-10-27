@@ -156,11 +156,6 @@ function taskListHtml(subject, classId) {
   return html + '</ul>';
 }
 
-function shortDate(iso) {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
-}
-
 function showTaskInfo(anchor, subject, classId, n) {
   if (openPopover?.anchor === anchor) return closePopover();
   const p = state.index.get(`${classId}:${subject.id}:${n}`);

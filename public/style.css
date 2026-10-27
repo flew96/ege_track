@@ -321,6 +321,9 @@ table.compare .cell.in_progress { background: var(--progress-soft); box-shadow: 
 
 .section-head { display: flex; align-items: center; gap: 12px; margin: 28px 0 12px; flex-wrap: wrap; }
 .section-head:first-child { margin-top: 0; }
+.section-head select { width: auto; }
+
+.history-change { gap: 6px; align-items: center; }
 
 /* ---------- диалоги ---------- */
 
